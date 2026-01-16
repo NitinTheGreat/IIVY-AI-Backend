@@ -1,0 +1,24 @@
+# Azure Functions
+azure-functions
+
+# Core dependencies (same as main project)
+pinecone-client==5.0.1
+openai
+google-genai
+google-generativeai
+python-dotenv
+requests
+pypdf
+beautifulsoup4
+
+# Google Auth for Gmail
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
+
+# Supabase Storage
+supabase
+
+# HTTP Streaming for SSE (Progress updates)
+azurefunctions-extensions-http-fastapi

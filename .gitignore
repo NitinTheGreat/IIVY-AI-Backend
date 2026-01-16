@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+*.egg-info/
+dist/
+build/
+
+# Azure Functions
+local.settings.json
+.python_packages/
+bin/
+obj/
+.vscode/
+.funcignore
+
+# Project specific
+project_indexes/
+*.log
+token_gmail.json
+credentials_gmail.json
+
+# IDE
+.idea/
+*.swp
+*.swo
