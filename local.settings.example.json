@@ -1,0 +1,31 @@
+{
+    "IsEncrypted": false,
+    "Values": {
+        "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+        "FUNCTIONS_WORKER_RUNTIME": "python",
+        "PYTHON_ENABLE_INIT_INDEXING": "1",
+        "OPENAI_API_KEY": "YOUR_OPENAI_API_KEY",
+        "GOOGLE_API_KEY": "YOUR_GOOGLE_API_KEY",
+        "GEMINI_API_KEY": "YOUR_GEMINI_API_KEY",
+        "LLM_MODEL": "gpt-4o-mini",
+        "PINECONE_API_KEY": "YOUR_PINECONE_API_KEY",
+        "MICROSOFT_CLIENT_ID": "YOUR_MICROSOFT_CLIENT_ID",
+        "MICROSOFT_CLIENT_SECRET": "YOUR_MICROSOFT_CLIENT_SECRET",
+        "MICROSOFT_TENANT_ID": "common",
+        "GOOGLE_DESKTOP_CLIENT_ID": "YOUR_GOOGLE_DESKTOP_CLIENT_ID",
+        "GOOGLE_DESKTOP_CLIENT_SECRET": "YOUR_GOOGLE_DESKTOP_CLIENT_SECRET",
+        "GOOGLE_WEB_CLIENT_ID": "YOUR_GOOGLE_WEB_CLIENT_ID",
+        "GOOGLE_WEB_CLIENT_SECRET": "YOUR_GOOGLE_WEB_CLIENT_SECRET",
+        "SUPABASE_URL": "YOUR_SUPABASE_URL",
+        "SUPABASE_KEY": "YOUR_SUPABASE_KEY",
+        "VERBOSE_MODE": "true",
+        "SUPABASE_STORAGE_BUCKET": "json-storage",
+        "DEBUG_MODE": "false",
+        "LOG_LEVEL": "INFO",
+        "IS_LOCAL_DEV": "true"
+    },
+    "Host": {
+        "CORS": "*",
+        "CORSCredentials": false
+    }
+}
