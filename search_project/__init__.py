@@ -64,6 +64,14 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         # Create search instance
         search = ProjectSearch()
         
+        # Debug: Log what project_id is received and what namespaces exist
+        logging.info(f'search_project: Received project_id="{project_id}"')
+        available_namespaces = search.list_projects()
+        logging.info(f'search_project: Available namespaces in Pinecone: {available_namespaces}')
+        
+        if project_id not in available_namespaces:
+            logging.warning(f'search_project: project_id "{project_id}" NOT FOUND in Pinecone namespaces!')
+        
         # Run search
         logging.info(f'search_project: Searching "{project_id}" for: {question[:50]}...')
         result = search.ask(

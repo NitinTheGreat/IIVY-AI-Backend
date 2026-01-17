@@ -119,8 +119,36 @@ class AttachmentIndex:
 # ============================================================
 
 def _normalize_project_id(project_name: str) -> str:
-    """Convert project name to a safe ID."""
+    """
+    Convert project name to a safe ID (DEPRECATED).
+    
+    WARNING: This function does NOT provide user isolation!
+    Use _generate_project_id(project_name, user_email) instead.
+    """
     return re.sub(r'[^a-z0-9]+', '_', project_name.lower()).strip('_')
+
+
+def _generate_project_id(project_name: str, user_email: str) -> str:
+    """
+    Generate a unique project ID with user isolation.
+    
+    Format: {normalized_name}_{user_hash}
+    Example: "my_project_a1b2c3d4" for user@example.com project "My Project"
+    
+    Args:
+        project_name: Human-readable project name (e.g., "88 SuperMarket")
+        user_email: User's email address for isolation
+        
+    Returns:
+        Unique project ID safe for use as Pinecone namespace
+    """
+    # Normalize project name (lowercase, replace non-alphanumeric with underscore)
+    normalized_name = re.sub(r'[^a-z0-9]+', '_', project_name.lower()).strip('_')
+    
+    # Create 8-character hash from user email for uniqueness
+    email_hash = hashlib.sha256(user_email.lower().strip().encode()).hexdigest()[:8]
+    
+    return f"{normalized_name}_{email_hash}"
 
 
 def _clean_body(raw: str) -> str:
@@ -542,7 +570,7 @@ class ProjectIndexer:
             max_workers: Number of parallel workers for downloads
         """
         self.project_name = project_name
-        self.project_id = _normalize_project_id(project_name)
+        self.project_id = _generate_project_id(project_name, user_email)
         self.user_email = user_email
         self.provider = provider.lower()
         self.credentials = credentials

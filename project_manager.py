@@ -259,10 +259,10 @@ class ProjectManager:
         Returns:
             ProjectInfo for the indexed project
         """
-        from project_indexer import ProjectIndexer, _normalize_project_id
+        from project_indexer import ProjectIndexer, _generate_project_id
         from project_vectorizer import ProjectVectorizer
         
-        project_id = _normalize_project_id(project_name)
+        project_id = _generate_project_id(project_name, user_email)
         
         def _progress(phase: str, msg: str, pct: int, details: Dict = None):
             if progress_callback:

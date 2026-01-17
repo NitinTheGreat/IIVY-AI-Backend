@@ -46,6 +46,23 @@ def stream_search_generator(project_id: str, question: str, top_k: int = None, f
         # Create search instance
         search = ProjectSearch()
         
+        # Check if namespace exists
+        available_namespaces = search.list_projects()
+        logging.info(f'stream_search: project_id="{project_id}", available={available_namespaces}')
+        
+        if project_id not in available_namespaces:
+            # Try to find a matching namespace (in case of format mismatch)
+            matching = [ns for ns in available_namespaces if ns.startswith(project_id.split('_')[0])]
+            if matching:
+                yield format_sse("error", {
+                    "message": f"Project '{project_id}' not found. Did you mean: {matching}? The project may have been indexed with a different ID format."
+                })
+            else:
+                yield format_sse("error", {
+                    "message": f"Project '{project_id}' not found in database. Available projects: {available_namespaces}"
+                })
+            return
+        
         # Determine top_k based on question type
         if top_k is None:
             top_k = search._determine_top_k(question)
