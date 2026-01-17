@@ -30,7 +30,9 @@ GRAPH_API_ENDPOINT = "https://graph.microsoft.com/v1.0"
 # Store everything in the DonnaEmail project folder
 PROJECT_ROOT = Path(__file__).parent
 CACHE_DIR = PROJECT_ROOT / ".donna_cache"
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
+IS_LOCAL_DEV = os.getenv("IS_LOCAL_DEV", "true").lower() == "true"
+if IS_LOCAL_DEV:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
 TOKEN_CACHE_PATH = CACHE_DIR / "msal_token.json"
 
 # ============================================================

@@ -39,6 +39,7 @@ load_dotenv()
 PINECONE_INDEX_NAME = "donna-email"
 PROJECT_INDEXES_DIR = "project_indexes"
 REGISTRY_FILE = "index_registry.json"
+IS_LOCAL_DEV = os.environ.get("IS_LOCAL_DEV", "true").lower() == "true"
 
 
 # ============================================================
@@ -97,8 +98,9 @@ class ProjectManager:
         self.indexes_dir = indexes_dir
         self.registry_path = os.path.join(indexes_dir, REGISTRY_FILE)
         
-        # Ensure directory exists
-        os.makedirs(indexes_dir, exist_ok=True)
+        # Ensure directory exists (only on local - Azure filesystem is read-only)
+        if IS_LOCAL_DEV:
+            os.makedirs(indexes_dir, exist_ok=True)
         
         # Lazy-loaded clients
         self._pinecone_index = None
