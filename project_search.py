@@ -22,6 +22,7 @@ import json
 import os
 import re
 import time
+import logging
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass, asdict
@@ -31,6 +32,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def normalize_project_id(name: str) -> str:
+    """Normalize project name to match Pinecone namespace format."""
+    return re.sub(r'[^a-z0-9]+', '_', name.lower()).strip('_')
+
+
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -38,23 +44,15 @@ load_dotenv()
 # Pinecone settings
 PINECONE_INDEX_NAME = "donna-email"
 
-# OpenAI settings
+# OpenAI settings (for embeddings only)
 EMBEDDING_MODEL = "text-embedding-3-small"
 
-# LLM Provider settings
-LLM_PROVIDER = "gemini"  # Options: "openai", "gemini"
-
-# OpenAI Config
-OPENAI_MODEL = "gpt-5-nano-2025-08-07"
-OPENAI_TEMPERATURE = 1
-
-# Gemini Config
+# Gemini Config (for LLM answers)
 GEMINI_MODEL = "gemini-3-flash-preview"
 GEMINI_TEMPERATURE = 0.2
 
 # Search settings
-DEFAULT_TOP_K = 90  # Increased to 50 to capture more context (e.g. split invoices)
-EXPANDED_TOP_K = 90  # For "all" or "latest" queries
+TOP_K = 90  # Number of chunks to retrieve from Pinecone
 
 
 # ============================================================
@@ -175,9 +173,13 @@ class ProjectSearch:
         """
         total_start = time.time()
         
-        # Determine top_k based on question type
+        # Normalize project_id to match Pinecone namespace format
+        # e.g., "Load Minds" -> "load_minds", "Security" -> "security"
+        project_id = normalize_project_id(project_id)
+        
+        # Use default top_k if not specified
         if top_k is None:
-            top_k = self._determine_top_k(question)
+            top_k = TOP_K
         
         print(f"\n🔍 Searching project '{project_id}' (top_k={top_k})")
         print(f"   Question: {question[:80]}{'...' if len(question) > 80 else ''}")
@@ -249,24 +251,6 @@ class ProjectSearch:
             context_string=context # Pass the raw context for debugging
         )
     
-    def _determine_top_k(self, question: str) -> int:
-        """Determine how many chunks to retrieve based on question type."""
-        q_lower = question.lower()
-        
-        # Expand for aggregate queries
-        if any(word in q_lower for word in ["all", "total", "every", "list all", "find all"]):
-            return EXPANDED_TOP_K
-        
-        # Expand for latest/recent queries
-        if any(word in q_lower for word in ["latest", "recent", "newest", "last", "most recent"]):
-            return EXPANDED_TOP_K
-        
-        # Expand for summary queries
-        if any(word in q_lower for word in ["summary", "overview", "status", "update"]):
-            return EXPANDED_TOP_K
-        
-        return DEFAULT_TOP_K
-    
     def _is_latest_query(self, question: str) -> bool:
         """Check if this is a 'latest' type query that needs timestamp sorting."""
         q_lower = question.lower()
@@ -288,6 +272,18 @@ class ProjectSearch:
         filter_metadata: Optional[Dict] = None
     ) -> List[Dict]:
         """Search Pinecone and return matches."""
+        
+        # --- DEBUG LOGGING ---
+        logging.info(f"\n--- PINECONE QUERY DEBUG ---")
+        logging.info(f"Index: {self.index_name}")
+        logging.info(f"Namespace: {namespace}")
+        logging.info(f"Top K: {top_k}")
+        logging.info(f"Filter: {filter_metadata}")
+        logging.info(f"Embedding length: {len(embedding)}")
+        logging.info(f"Embedding sample (first 5): {embedding[:5]}")
+        logging.info(f"----------------------------\n")
+        # ---------------------
+        
         query_params = {
             "vector": embedding,
             "top_k": top_k,
@@ -352,13 +348,24 @@ class ProjectSearch:
     def _generate_answer(self, question: str, context: str, project_id: str):
         """Use LLM to generate answer from context (Streaming)."""
         
+        # Get current date for context
+        current_date = datetime.now().strftime("%B %d, %Y")
+        
         system_prompt = f"""You are an expert assistant helping users find information in their project emails and documents.
 
 PROJECT: {project_id.replace('_', ' ').title()}
+TODAY'S DATE: {current_date}
 
 Your job is to answer questions based ONLY on the provided context. The context contains:
 - EMAIL messages (with sender, date, subject, body)
 - DOCUMENT content (AI-extracted content from PDFs like invoices, drawings, reports)
+
+**IMPORTANT - RECENCY PRIORITY:**
+In construction projects, the LATEST information is usually the most accurate and relevant.
+- When multiple sources contain similar information, PREFER the most recent one
+- Look at the timestamps in the sources to identify which is newest
+- If there are conflicting details (e.g., different prices, specs, quantities), use the LATEST source
+- Explicitly mention the date when citing sources so the user knows how current the info is
 
 Guidelines:
 1. Answer based ONLY on the provided context - don't make up information
@@ -370,6 +377,7 @@ Guidelines:
 5. For financial questions, be precise with dollar amounts
 6. For date questions, provide the exact dates found
 7. Keep answers concise but complete
+8. When information has changed over time, highlight the LATEST value and note any previous values if relevant
 
 If asked about "latest" or "most recent", look at the timestamps in the sources to identify the newest."""
 
@@ -383,28 +391,8 @@ QUESTION: {question}
 
 Please provide a clear, specific answer based on the context above. Cite relevant sources."""
 
-        if LLM_PROVIDER == "gemini":
-            return self._generate_answer_gemini(system_prompt, user_prompt)
-        else:
-            return self._generate_answer_openai(system_prompt, user_prompt)
-
-    def _generate_answer_openai(self, system_prompt: str, user_prompt: str):
-        """Generate answer using OpenAI."""
-        response = self.openai_client.chat.completions.create(
-            model=OPENAI_MODEL,
-            temperature=OPENAI_TEMPERATURE,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            stream=True
-        )
-        return response
-
-    def _generate_answer_gemini(self, system_prompt: str, user_prompt: str):
-        """Generate answer using Gemini (New SDK)."""
+        # Generate answer using Gemini
         try:
-            # Combine system prompt if model was init without it
             full_prompt = f"{system_prompt}\n\n{user_prompt}"
             
             response = self.gemini_model.models.generate_content_stream(
@@ -431,6 +419,8 @@ Please provide a clear, specific answer based on the context above. Cite relevan
     
     def get_project_stats(self, project_id: str) -> Dict:
         """Get stats for a project namespace."""
+        # Normalize project_id to match Pinecone namespace format
+        project_id = normalize_project_id(project_id)
         stats = self.pinecone_index.describe_index_stats()
         ns_stats = stats.get("namespaces", {}).get(project_id, {})
         return {
@@ -453,7 +443,7 @@ def ask_project(
     Convenience function to ask a question about a project.
     
     Args:
-        project_id: Project namespace (e.g., "88_supermarket")
+        project_id: Project namespace (e.g., "88_supermarket" or "88 SuperMarket")
         question: The question to ask
         pinecone_api_key: Optional Pinecone API key
         openai_api_key: Optional OpenAI API key
@@ -461,6 +451,7 @@ def ask_project(
     Returns:
         SearchResult
     """
+    # Note: project_id is normalized inside search.ask()
     search = ProjectSearch(
         pinecone_api_key=pinecone_api_key,
         openai_api_key=openai_api_key
@@ -475,6 +466,9 @@ def interactive_search(project_id: str):
     Args:
         project_id: Project namespace to search
     """
+    # Normalize project_id to match Pinecone namespace format
+    project_id = normalize_project_id(project_id)
+    
     search = ProjectSearch()
     
     print(f"\n{'='*60}")
@@ -505,18 +499,10 @@ def interactive_search(project_id: str):
             
             if isinstance(result.answer, str):
                 print(result.answer)
-            elif LLM_PROVIDER == "gemini":
+            else:
                 # Handle Gemini stream
                 for chunk in result.answer:
                     text = chunk.text
-                    if text:
-                        print(text, end="", flush=True)
-                        full_answer += text
-                print()
-            else:
-                # Handle OpenAI stream
-                for chunk in result.answer:
-                    text = chunk.choices[0].delta.content
                     if text:
                         print(text, end="", flush=True)
                         full_answer += text
@@ -633,20 +619,14 @@ Examples:
     full_answer = ""
     if isinstance(result.answer, str):
         print(result.answer)
-    elif LLM_PROVIDER == "gemini":
+    else:
+        # Handle Gemini stream
         for chunk in result.answer:
             text = chunk.text
             if text:
                 print(text, end="", flush=True)
                 full_answer += text
         print()
-    else:
-        for chunk in result.answer:
-            text = chunk.choices[0].delta.content
-            if text:
-                print(text, end="", flush=True)
-                full_answer += text
-        print() # Newline at end
         
     print(f"\n{'='*60}")
     print(f"📊 Retrieved {result.chunks_retrieved} chunks in {result.total_time_ms}ms")

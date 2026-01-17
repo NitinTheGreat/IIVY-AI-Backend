@@ -31,8 +31,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     {
         "project_name": "88 SuperMarket",
         "user_email": "harv@example.com",
-        "gmail_credentials": { "access_token": "...", "refresh_token": "...", ... },
-        "max_threads": 50  // Optional: limit number of threads to index
+        "gmail_credentials": { "access_token": "...", "refresh_token": "...", ... }
     }
     
     Returns:
@@ -64,17 +63,13 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     if err:
         return err
     
-    # Optional parameters
-    max_threads = body.get("max_threads")
-    
     try:
         # Create the indexer
         indexer = ProjectIndexer(
             project_name=project_name,
             user_email=user_email,
             provider="gmail",
-            credentials=gmail_credentials,
-            max_threads=max_threads
+            credentials=gmail_credentials
         )
         
         # Run indexing

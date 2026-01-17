@@ -27,3 +27,4 @@ credentials_gmail.json
 .idea/
 *.swp
 *.swo
+.venv/

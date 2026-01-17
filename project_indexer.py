@@ -186,43 +186,6 @@ def _clean_body(raw: str) -> str:
     return text.strip()
 
 
-def _extract_pdf_all_pages(pdf_bytes: bytes, max_chars: int = 500000) -> str:
-    """
-    Extract text from ALL pages of a PDF using pypdf.
-    Returns empty string if no text found (likely a drawing/scan).
-    """
-    if not pdf_bytes:
-        return ""
-    
-    try:
-        from pypdf import PdfReader
-        
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        all_text = []
-        
-        for page in reader.pages:
-            page_text = page.extract_text() or ""
-            if page_text.strip():
-                all_text.append(page_text)
-        
-        combined = '\n\n--- PAGE BREAK ---\n\n'.join(all_text)
-        
-        # Normalize whitespace
-        combined = combined.replace('\r\n', '\n').replace('\r', '\n')
-        combined = re.sub(r'[ \t]+\n', '\n', combined)
-        combined = re.sub(r'\n{3,}', '\n\n', combined).strip()
-        
-        # Cap at max chars
-        if len(combined) > max_chars:
-            combined = combined[:max_chars] + '\n\n...[TRUNCATED]...'
-        
-        return combined
-    
-    except Exception as e:
-        print(f"⚠️ PDF text extraction failed: {e}")
-        return ""
-
-
 def _build_comprehensive_extraction_prompt(filename: str) -> str:
     """
     Build a prompt that extracts and explains EVERYTHING from PDFs like a very smart human.
@@ -527,7 +490,6 @@ class ProjectIndexer:
         user_email: str,
         provider: str = "gmail",
         credentials: Optional[Dict] = None,
-        max_threads: Optional[int] = None,
         max_workers: int = 10
     ):
         """
@@ -538,7 +500,6 @@ class ProjectIndexer:
             user_email: User's email address
             provider: Email provider ("gmail" or "outlook")
             credentials: Optional credentials for web mode
-            max_threads: Maximum number of threads to index (None = unlimited)
             max_workers: Number of parallel workers for downloads
         """
         self.project_name = project_name
@@ -546,7 +507,6 @@ class ProjectIndexer:
         self.user_email = user_email
         self.provider = provider.lower()
         self.credentials = credentials
-        self.max_threads = max_threads
         self.max_workers = max_workers
         
         # Initialize email tools
@@ -591,7 +551,6 @@ class ProjectIndexer:
         print(f"   Project ID:  {self.project_id}")
         print(f"   User:        {self.user_email}")
         print(f"   Provider:    {self.provider}")
-        print(f"   Max threads: {self.max_threads or 'unlimited'}")
         print(f"   Workers:     {self.max_workers}")
         print("="*60)
         
@@ -719,12 +678,9 @@ class ProjectIndexer:
             has_more = result.get("has_more", False)
             if not page_cursor or not has_more:
                 break
-            if self.max_threads and len(all_thread_ids) >= self.max_threads:
-                print(f"      ⚠️ Reached max threads limit ({self.max_threads})")
-                break
         
         print(f"   ✅ Search complete: {len(all_thread_ids)} unique threads found")
-        return list(all_thread_ids)[:self.max_threads] if self.max_threads else list(all_thread_ids)
+        return list(all_thread_ids)
     
     def _fetch_all_threads(self, thread_ids: List[str], progress_cb) -> List[Dict]:
         """Fetch all threads in parallel."""

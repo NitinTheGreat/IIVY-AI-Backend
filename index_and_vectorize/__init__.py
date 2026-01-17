@@ -72,8 +72,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     {
         "project_name": "88 SuperMarket",
         "user_email": "harv@example.com",
-        "gmail_credentials": { "access_token": "...", "refresh_token": "...", ... },
-        "max_threads": 50  // Optional: limit number of threads to index
+        "gmail_credentials": { "access_token": "...", "refresh_token": "...", ... }
     }
     
     Returns: JSON with complete result and progress log
@@ -97,8 +96,6 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     gmail_credentials, err = get_required_param(body, "gmail_credentials")
     if err:
         return err
-    
-    max_threads = body.get("max_threads")
     
     # Generate project_id early for progress tracking
     project_id = project_name.lower().replace(" ", "_").replace("-", "_")
@@ -174,8 +171,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             project_name=project_name,
             user_email=user_email,
             provider="gmail",
-            credentials=gmail_credentials,
-            max_threads=max_threads
+            credentials=gmail_credentials
         )
         
         log_progress("Connecting to your email account...", 3)

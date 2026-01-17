@@ -11,14 +11,20 @@ import sys
 import os
 import json
 import time
+import re
 from typing import Generator
+
+
+def normalize_project_id(name: str) -> str:
+    """Normalize project name to match Pinecone namespace format."""
+    return re.sub(r'[^a-z0-9]+', '_', name.lower()).strip('_')
 
 # Add parent directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import azure.functions as func
 
-from project_search import ProjectSearch, LLM_PROVIDER
+from project_search import ProjectSearch, TOP_K, GEMINI_MODEL, GEMINI_TEMPERATURE
 
 
 def format_sse(event: str, data: dict) -> str:
@@ -39,6 +45,10 @@ def stream_search_generator(project_id: str, question: str, top_k: int = None, f
     """
     total_start = time.time()
     
+    # Normalize project_id to match Pinecone namespace format
+    # e.g., "Load Minds" -> "load_minds", "Security" -> "security"
+    project_id = normalize_project_id(project_id)
+    
     try:
         # Yield initial thinking status
         yield format_sse("thinking", {"status": "🔍 Searching project data..."})
@@ -46,9 +56,9 @@ def stream_search_generator(project_id: str, question: str, top_k: int = None, f
         # Create search instance
         search = ProjectSearch()
         
-        # Determine top_k based on question type
+        # Use default top_k if not specified
         if top_k is None:
-            top_k = search._determine_top_k(question)
+            top_k = TOP_K
         
         # Step 1: Embed the question
         search_start = time.time()
@@ -64,6 +74,7 @@ def stream_search_generator(project_id: str, question: str, top_k: int = None, f
             filter_metadata=filter_metadata
         )
         search_time_ms = int((time.time() - search_start) * 1000)
+        logging.info(f"Pinecone search returned {len(raw_results)} results in {search_time_ms}ms")
         
         if not raw_results:
             yield format_sse("thinking", {"status": "No relevant documents found"})
@@ -108,14 +119,26 @@ def stream_search_generator(project_id: str, question: str, top_k: int = None, f
         
         llm_start = time.time()
         
+        # Get current date for context
+        from datetime import datetime
+        current_date = datetime.now().strftime("%B %d, %Y")
+        
         # Build prompts
         system_prompt = f"""You are an expert assistant helping users find information in their project emails and documents.
 
 PROJECT: {project_id.replace('_', ' ').title()}
+TODAY'S DATE: {current_date}
 
 Your job is to answer questions based ONLY on the provided context. The context contains:
 - EMAIL messages (with sender, date, subject, body)
 - DOCUMENT content (AI-extracted content from PDFs like invoices, drawings, reports)
+
+**IMPORTANT - RECENCY PRIORITY:**
+In construction projects, the LATEST information is usually the most accurate and relevant.
+- When multiple sources contain similar information, PREFER the most recent one
+- Look at the timestamps in the sources to identify which is newest
+- If there are conflicting details (e.g., different prices, specs, quantities), use the LATEST source
+- Explicitly mention the date when citing sources so the user knows how current the info is
 
 Guidelines:
 1. Answer based ONLY on the provided context - don't make up information
@@ -127,6 +150,7 @@ Guidelines:
 5. For financial questions, be precise with dollar amounts
 6. For date questions, provide the exact dates found
 7. Keep answers concise but complete
+8. When information has changed over time, highlight the LATEST value and note any previous values if relevant
 
 If asked about "latest" or "most recent", look at the timestamps in the sources to identify the newest."""
 
@@ -140,32 +164,16 @@ QUESTION: {question}
 
 Please provide a clear, specific answer based on the context above. Cite relevant sources."""
 
-        # Stream from LLM
-        if LLM_PROVIDER == "gemini":
-            # Gemini streaming
-            full_prompt = f"{system_prompt}\n\n{user_prompt}"
-            response = search.gemini_model.models.generate_content_stream(
-                model="gemini-3-flash-preview",
-                contents=full_prompt,
-                config={"temperature": 0.2}
-            )
-            for chunk in response:
-                if chunk.text:
-                    yield format_sse("chunk", {"text": chunk.text})
-        else:
-            # OpenAI streaming
-            response = search.openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                temperature=0.7,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                stream=True
-            )
-            for chunk in response:
-                if chunk.choices[0].delta.content:
-                    yield format_sse("chunk", {"text": chunk.choices[0].delta.content})
+        # Stream from Gemini
+        full_prompt = f"{system_prompt}\n\n{user_prompt}"
+        response = search.gemini_model.models.generate_content_stream(
+            model=GEMINI_MODEL,
+            contents=full_prompt,
+            config={"temperature": GEMINI_TEMPERATURE}
+        )
+        for chunk in response:
+            if chunk.text:
+                yield format_sse("chunk", {"text": chunk.text})
         
         llm_time_ms = int((time.time() - llm_start) * 1000)
         total_time_ms = int((time.time() - total_start) * 1000)
@@ -240,7 +248,10 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     # NOTE: In v1 model, we can't do true streaming, but we return SSE format
     # so the frontend can consume it the same way as true streaming
     sse_events = ""
+    logging.info(f"Starting search stream for project: {project_id}, question: {question}")
+    
     for event in stream_search_generator(project_id, question, top_k, filter_metadata):
+        logging.info(f"SSE OUPUT: {event.strip()}")
         sse_events += event
     
     return func.HttpResponse(
