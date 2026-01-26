@@ -21,11 +21,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import azure.functions as func
 
+from pinecone import Pinecone
+
 from shared import parse_request_body, get_required_param, upload_project_data, create_response, create_error_response, CancellationError, delete_project_data
 from shared.progress_store import update_progress, clear_progress, is_cancelled, clear_cancel
 from project_indexer import ProjectIndexer, _generate_project_id
 from project_vectorizer import ProjectVectorizer
-from project_manager import ProjectManager
+
+# Configuration
+PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "donna-email")
 
 logger = logging.getLogger(__name__)
 
@@ -296,9 +300,12 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         
         # Cleanup Step 2: Delete from Pinecone (if any vectors were created)
         try:
-            manager = ProjectManager()
-            manager.delete_project(project_id)
-            logger.info(f"Cleanup: Deleted Pinecone namespace for {project_id}")
+            pinecone_api_key = os.environ.get("PINECONE_API_KEY")
+            if pinecone_api_key:
+                pc = Pinecone(api_key=pinecone_api_key)
+                index = pc.Index(PINECONE_INDEX_NAME)
+                index.delete(delete_all=True, namespace=project_id)
+                logger.info(f"Cleanup: Deleted Pinecone namespace for {project_id}")
         except Exception as cleanup_err:
             logger.warning(f"Cleanup: Could not delete Pinecone namespace: {cleanup_err}")
         
