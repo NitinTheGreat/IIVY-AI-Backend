@@ -12,6 +12,18 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import azure.functions as func
 
 
+# ============================================================
+# CUSTOM EXCEPTIONS
+# ============================================================
+
+class CancellationError(Exception):
+    """
+    Raised when indexing/vectorization is cancelled by user request.
+    This allows graceful shutdown and cleanup of partial data.
+    """
+    pass
+
+
 def create_response(data: dict, status_code: int = 200) -> func.HttpResponse:
     """Create a JSON HTTP response."""
     return func.HttpResponse(
@@ -70,4 +82,14 @@ from shared.supabase_storage import (
     download_threads_data,
     download_attachments_data,
     delete_project_data
+)
+
+# Progress Store exports (including cancellation)
+from shared.progress_store import (
+    update_progress,
+    get_progress,
+    clear_progress,
+    request_cancel,
+    is_cancelled,
+    clear_cancel
 )

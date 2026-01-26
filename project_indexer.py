@@ -28,6 +28,8 @@ from dataclasses import dataclass, asdict
 # Local imports
 from tools.gmail_tools import get_gmail_tools, GmailTools
 from llm_brain import get_llm_brain
+from shared import CancellationError
+from shared.progress_store import is_cancelled
 
 
 # ============================================================
@@ -716,6 +718,10 @@ class ProjectIndexer:
         page_num = 0
         
         while True:
+            # Check for cancellation
+            if is_cancelled(self.project_id):
+                raise CancellationError(f"Indexing cancelled during email search for project {self.project_id}")
+            
             page_num += 1
             print(f"      📄 Fetching search results page {page_num}...")
             
@@ -772,6 +778,11 @@ class ProjectIndexer:
             done_count = 0
             
             for future in as_completed(futures):
+                # Check for cancellation
+                if is_cancelled(self.project_id):
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise CancellationError(f"Indexing cancelled during thread fetch for project {self.project_id}")
+                
                 done_count += 1
                 result = future.result()
                 if result and not result.get("error"):
@@ -802,6 +813,10 @@ class ProjectIndexer:
         total_attachments = 0
         
         for thread_idx, thread in enumerate(raw_threads, start=1):
+            # Check for cancellation every 10 threads
+            if thread_idx % 10 == 0 and is_cancelled(self.project_id):
+                raise CancellationError(f"Indexing cancelled during attachment scan for project {self.project_id}")
+            
             thread_id = thread.get("conversation_id") or thread.get("thread_id", "")
             messages = thread.get("messages") or []
             
@@ -873,6 +888,10 @@ class ProjectIndexer:
         hash_to_first_task = {}
         
         for i, task in enumerate(pdf_tasks):
+            # Check for cancellation during downloads
+            if is_cancelled(self.project_id):
+                raise CancellationError(f"Indexing cancelled during PDF download for project {self.project_id}")
+            
             thread_id, msg_id, att_id, filename = task
             
             try:
@@ -937,6 +956,10 @@ class ProjectIndexer:
         unique_tasks = [(i, pdf_tasks[i]) for i in hash_to_first_task.values()]
         
         for processed_idx, (task_idx, task) in enumerate(unique_tasks, 1):
+            # Check for cancellation BEFORE each expensive Gemini API call
+            if is_cancelled(self.project_id):
+                raise CancellationError(f"Indexing cancelled during PDF processing for project {self.project_id}")
+            
             thread_id, msg_id, att_id, filename = task
             pdf_bytes, content_hash = downloaded[task_idx]
             

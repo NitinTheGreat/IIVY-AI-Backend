@@ -34,6 +34,10 @@ from dotenv import load_dotenv
 # Load environment variables from .env file if it exists
 load_dotenv()
 
+# Import cancellation utilities
+from shared import CancellationError
+from shared.progress_store import is_cancelled
+
 
 # ============================================================
 # CONFIGURATION
@@ -112,6 +116,9 @@ class ProjectVectorizer:
         # Initialize clients lazily
         self._pinecone_index = None
         self._openai_client = None
+        
+        # Project ID for cancellation checks (set during vectorize_project)
+        self._current_project_id = None
     
     @property
     def pinecone_index(self):
@@ -163,6 +170,9 @@ class ProjectVectorizer:
         
         project_id = threads_data.get("project_id", "unknown")
         project_name = threads_data.get("project_name", "Unknown Project")
+        
+        # Store project_id for cancellation checks
+        self._current_project_id = project_id
         
         print(f"   Project:     {project_name}")
         print(f"   Project ID:  {project_id}")
@@ -416,6 +426,10 @@ PARENT EMAIL ID: {message_id}
         
         # Process in batches
         for i in range(0, len(texts), EMBEDDING_BATCH_SIZE):
+            # Check for cancellation before each batch
+            if self._current_project_id and is_cancelled(self._current_project_id):
+                raise CancellationError(f"Vectorization cancelled during embedding for project {self._current_project_id}")
+            
             batch_texts = texts[i:i + EMBEDDING_BATCH_SIZE]
             batch_chunks = chunks[i:i + EMBEDDING_BATCH_SIZE]
             
@@ -449,6 +463,10 @@ PARENT EMAIL ID: {message_id}
         batch_size = 100  # Pinecone recommends 100-200 vectors per upsert
         
         for i in range(0, len(vectors), batch_size):
+            # Check for cancellation before each batch
+            if self._current_project_id and is_cancelled(self._current_project_id):
+                raise CancellationError(f"Vectorization cancelled during Pinecone upsert for project {self._current_project_id}")
+            
             batch = vectors[i:i + batch_size]
             self.pinecone_index.upsert(vectors=batch, namespace=namespace)
             

@@ -21,10 +21,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import azure.functions as func
 
-from shared import parse_request_body, get_required_param, upload_project_data, create_response, create_error_response
-from shared.progress_store import update_progress, clear_progress
+from shared import parse_request_body, get_required_param, upload_project_data, create_response, create_error_response, CancellationError, delete_project_data
+from shared.progress_store import update_progress, clear_progress, is_cancelled, clear_cancel
 from project_indexer import ProjectIndexer, _generate_project_id
 from project_vectorizer import ProjectVectorizer
+from project_manager import ProjectManager
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +282,44 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         }
         
         return create_response(final_result)
+        
+    except CancellationError as e:
+        # User requested cancellation - perform cleanup
+        logger.info(f"index_and_vectorize: Cancellation detected for {project_id}: {str(e)}")
+        
+        # Cleanup Step 1: Delete from Supabase Storage (if anything was uploaded)
+        try:
+            delete_project_data(user_email, project_id)
+            logger.info(f"Cleanup: Deleted Supabase storage for {project_id}")
+        except Exception as cleanup_err:
+            logger.warning(f"Cleanup: Could not delete Supabase storage: {cleanup_err}")
+        
+        # Cleanup Step 2: Delete from Pinecone (if any vectors were created)
+        try:
+            manager = ProjectManager()
+            manager.delete_project(project_id)
+            logger.info(f"Cleanup: Deleted Pinecone namespace for {project_id}")
+        except Exception as cleanup_err:
+            logger.warning(f"Cleanup: Could not delete Pinecone namespace: {cleanup_err}")
+        
+        # Cleanup Step 3: Clear cancellation flag and progress
+        clear_cancel(project_id)
+        
+        # Update progress to show cancelled status
+        update_progress(
+            project_id,
+            "Cancelled",
+            "Project indexing was cancelled by user",
+            -1,
+            current_stats
+        )
+        
+        return create_response({
+            "status": "cancelled",
+            "project_id": project_id,
+            "message": "Project indexing was cancelled and partial data has been cleaned up",
+            "progress_log": progress_log
+        })
         
     except Exception as e:
         logger.error(f"index_and_vectorize error: {str(e)}", exc_info=True)

@@ -358,11 +358,15 @@ class ProjectManager:
     
     def delete_project(self, project_id: str):
         """
-        Delete a project (vectors + registry entry).
+        Delete a project (vectors + registry entry + Supabase storage).
         
         Args:
             project_id: Project ID to delete
         """
+        # Get user_email from registry before deleting (needed for Supabase)
+        registry = self._load_registry()
+        user_email = registry.get(project_id, {}).get("user_email")
+        
         # Delete from Pinecone
         if self.pinecone_index:
             try:
@@ -371,8 +375,21 @@ class ProjectManager:
             except Exception as e:
                 print(f"Warning: Could not delete Pinecone namespace: {e}")
         
+        # Delete from Supabase Storage
+        if user_email:
+            try:
+                from shared.supabase_storage import delete_project_data
+                success = delete_project_data(user_email, project_id)
+                if success:
+                    print(f"Deleted Supabase storage: {project_id}")
+                else:
+                    print(f"Warning: Could not delete Supabase storage for {project_id}")
+            except Exception as e:
+                print(f"Warning: Could not delete Supabase storage: {e}")
+        else:
+            print(f"Warning: No user_email found in registry, skipping Supabase deletion")
+        
         # Remove from registry
-        registry = self._load_registry()
         if project_id in registry:
             del registry[project_id]
             self._save_registry(registry)

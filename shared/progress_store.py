@@ -1,4 +1,4 @@
-"""In-memory progress store for real-time polling."""
+"""In-memory progress store for real-time polling and cancellation."""
 import time
 import logging
 from typing import Dict, Any, Optional
@@ -6,6 +6,7 @@ from typing import Dict, Any, Optional
 logger = logging.getLogger(__name__)
 
 _STORE: Dict[str, Dict[str, Any]] = {}
+_CANCELLED: Dict[str, bool] = {}
 
 
 def update_progress(project_id: str, phase: str, step: str, percent: int, details: dict = None):
@@ -41,4 +42,33 @@ def get_progress(project_id: str) -> Optional[Dict[str, Any]]:
 
 def clear_progress(project_id: str):
     _STORE.pop(project_id, None)
+
+
+# ============================================================
+# CANCELLATION MANAGEMENT
+# ============================================================
+
+def request_cancel(project_id: str):
+    """
+    Mark a project for cancellation.
+    The indexing/vectorization loops will check this flag and stop.
+    """
+    _CANCELLED[project_id] = True
+    logger.info(f"CANCEL_REQUESTED: {project_id}")
+
+
+def is_cancelled(project_id: str) -> bool:
+    """
+    Check if a project has been marked for cancellation.
+    Call this in loops to enable graceful shutdown.
+    """
+    return _CANCELLED.get(project_id, False)
+
+
+def clear_cancel(project_id: str):
+    """
+    Clear the cancellation flag after cleanup is complete.
+    """
+    _CANCELLED.pop(project_id, None)
+    logger.info(f"CANCEL_CLEARED: {project_id}")
 
