@@ -2,12 +2,13 @@
     "scriptFile": "__init__.py",
     "bindings": [
         {
-            "authLevel": "function",
+            "authLevel": "anonymous",
             "type": "httpTrigger",
             "direction": "in",
             "name": "req",
             "methods": [
-                "post"
+                "post",
+                "options"
             ],
             "route": "search_project_stream"
         },
