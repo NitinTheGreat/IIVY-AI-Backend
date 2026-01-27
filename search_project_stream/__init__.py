@@ -1,24 +1,24 @@
 """
 Azure Function: search_project_stream
 
-HTTP Trigger with TRUE SSE streaming for real-time search responses.
+HTTP Trigger with SSE streaming for real-time search responses.
 Like ChatGPT/Gemini - sends "thinking" status, then streams answer tokens.
 
-Uses Azure Functions HTTP Streaming extension for real-time token delivery.
+NOTE: Azure Functions v1 model buffers responses. For true streaming,
+the frontend calls this endpoint DIRECTLY (bypassing Database Backend proxy)
+which removes one buffering layer and speeds up response delivery.
 """
 import logging
 import sys
 import os
 import json
 import time
-import asyncio
-from typing import Generator, AsyncGenerator
+from typing import Generator
 
 # Add parent directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import azure.functions as func
-from azurefunctions.extensions.http.fastapi import Request, StreamingResponse
 
 from project_search import ProjectSearch, LLM_PROVIDER
 
@@ -208,26 +208,12 @@ CORS_HEADERS = {
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
     "Access-Control-Max-Age": "86400",
-    "Cache-Control": "no-cache",
-    "Connection": "keep-alive",
 }
 
 
-async def stream_generator(project_id: str, question: str, top_k: int = None, filter_metadata: dict = None) -> AsyncGenerator[str, None]:
+def main(req: func.HttpRequest) -> func.HttpResponse:
     """
-    Async generator that wraps the sync generator and yields SSE events.
-    This allows true streaming with FastAPI's StreamingResponse.
-    """
-    # Run the synchronous generator in a way that yields control
-    for event in stream_search_generator(project_id, question, top_k, filter_metadata):
-        yield event
-        # Yield control to allow the event to be sent immediately
-        await asyncio.sleep(0)
-
-
-async def main(req: Request) -> StreamingResponse:
-    """
-    Stream search results as Server-Sent Events with TRUE real-time streaming.
+    Stream search results as Server-Sent Events.
     
     POST Body:
     {
@@ -238,54 +224,69 @@ async def main(req: Request) -> StreamingResponse:
     
     Returns: SSE stream with events: thinking, sources, chunk, done, error
     
-    Uses FastAPI StreamingResponse for real-time token delivery.
-    Frontend calls this endpoint directly (bypassing proxy) for instant streaming.
+    CORS enabled so frontend can call this DIRECTLY (bypassing Database Backend).
+    This removes one buffering layer for faster response delivery.
     """
-    logging.info('search_project_stream: Processing TRUE streaming request')
+    logging.info('search_project_stream: Processing streaming request')
     
     # Handle CORS preflight
     if req.method == "OPTIONS":
-        return StreamingResponse(
-            content=iter([""]),
+        return func.HttpResponse(
+            body="",
             status_code=204,
             headers=CORS_HEADERS
         )
     
-    # Parse request body
+    # Parse request
     try:
-        body = await req.json()
-    except Exception:
-        async def error_gen():
-            yield format_sse("error", {"message": "Request body must be valid JSON"})
-        return StreamingResponse(
-            content=error_gen(),
+        body = req.get_json()
+    except ValueError:
+        error_response = format_sse("error", {"message": "Request body must be valid JSON"})
+        return func.HttpResponse(
+            body=error_response,
             status_code=400,
-            media_type="text/event-stream",
-            headers=CORS_HEADERS
+            mimetype="text/event-stream",
+            headers={
+                **CORS_HEADERS,
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive"
+            }
         )
     
     project_id = body.get("project_id")
     question = body.get("question")
     
     if not project_id or not question:
-        async def error_gen():
-            yield format_sse("error", {"message": "Missing required parameters: project_id and question"})
-        return StreamingResponse(
-            content=error_gen(),
+        error_response = format_sse("error", {"message": "Missing required parameters: project_id and question"})
+        return func.HttpResponse(
+            body=error_response,
             status_code=400,
-            media_type="text/event-stream",
-            headers=CORS_HEADERS
+            mimetype="text/event-stream",
+            headers={
+                **CORS_HEADERS,
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive"
+            }
         )
     
     top_k = body.get("top_k")
     filter_metadata = body.get("filter_metadata")
     
-    logging.info(f'search_project_stream: Streaming for project={project_id}, question="{question[:50]}..."')
+    logging.info(f'search_project_stream: project={project_id}, question="{question[:50]}..."')
     
-    # Return TRUE streaming response - events sent as they're generated!
-    return StreamingResponse(
-        content=stream_generator(project_id, question, top_k, filter_metadata),
+    # Collect all SSE events from generator
+    # NOTE: v1 model buffers, but frontend calls directly = 1 less hop
+    sse_events = ""
+    for event in stream_search_generator(project_id, question, top_k, filter_metadata):
+        sse_events += event
+    
+    return func.HttpResponse(
+        body=sse_events,
         status_code=200,
-        media_type="text/event-stream",
-        headers=CORS_HEADERS
+        mimetype="text/event-stream",
+        headers={
+            **CORS_HEADERS,
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive"
+        }
     )
