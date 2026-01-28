@@ -88,9 +88,14 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 result["vectors_deleted"] = True
                 
             except Exception as e:
-                logging.warning(f'delete_project: Pinecone deletion warning - {str(e)}')
+                error_str = str(e).lower()
+                # Check if it's a "not found" error - this is OK, namespace just doesn't exist
+                if '404' in error_str or 'not found' in error_str or 'namespace' in error_str:
+                    logging.info(f'delete_project: Namespace "{project_id}" not found in Pinecone (already deleted or never indexed) - this is OK')
+                    result["vectors_deleted"] = True  # Consider it deleted since it doesn't exist
+                else:
+                    logging.warning(f'delete_project: Pinecone deletion warning - {str(e)}')
                 # Don't fail the whole request if Pinecone deletion has issues
-                # The namespace might not exist, which is fine
         else:
             logging.warning('delete_project: PINECONE_API_KEY not configured')
         
