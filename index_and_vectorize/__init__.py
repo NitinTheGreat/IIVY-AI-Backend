@@ -305,7 +305,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 pc = Pinecone(api_key=pinecone_api_key)
                 index = pc.Index(PINECONE_INDEX_NAME)
                 index.delete(delete_all=True, namespace=project_id)
-                logger.info(f"Cleanup: Deleted Pinecone namespace for {project_id}")
+            logger.info(f"Cleanup: Deleted Pinecone namespace for {project_id}")
         except Exception as cleanup_err:
             logger.warning(f"Cleanup: Could not delete Pinecone namespace: {cleanup_err}")
         
