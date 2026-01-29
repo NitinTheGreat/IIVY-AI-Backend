@@ -88,10 +88,11 @@ SUMMARY_SCHEMA = """## Current Focus
 
 @dataclass
 class RewriteResult:
-    """Result of query rewriting."""
+    """Result of query rewriting and classification."""
     original_question: str
     standalone_question: str
     was_rewritten: bool  # False if question was already standalone
+    question_type: str  # "rag" (needs vector search) or "conversation" (answer from chat history)
 
 
 @dataclass
@@ -164,12 +165,13 @@ class ConversationManager:
             Output:
                 standalone_question: "What is the cost breakdown for Invoice INV-1043 ($47,500)?"
         """
-        # If no conversation context, return as-is
+        # If no conversation context, return as-is (always RAG for first question)
         if not summary and not recent_messages:
             return RewriteResult(
                 original_question=question,
                 standalone_question=question,
-                was_rewritten=False
+                was_rewritten=False,
+                question_type="rag"  # First question always needs document search
             )
         
         # Build context for the rewriter
@@ -184,7 +186,7 @@ class ConversationManager:
         
         context = "\n\n".join(context_parts)
         
-        rewrite_prompt = f"""You are a query rewriter for a project document search system.
+        rewrite_prompt = f"""You are a query rewriter and classifier for a project document search system.
 
 PROJECT: {project_name or "Construction Project"}
 
@@ -196,23 +198,33 @@ USER'S NEW QUESTION: "{question}"
 
 ---
 
-TASK: Determine if this question references the previous conversation.
+TASK 1 - REWRITE: If the question references the conversation, rewrite it as standalone.
 
 Reference indicators:
 - Pronouns: "it", "they", "that", "this", "those", "the same"
 - Partial references: "the second one", "the first", "that invoice"
 - Implicit context: "what about...", "and the...", "how much for..."
-- Follow-up patterns: "what else", "anything more", "also"
 
-If the question DOES reference the conversation:
-- Rewrite it as a STANDALONE question that includes all necessary context
-- Include specific entity names, IDs, amounts from the conversation
-- Make it clear enough that someone with NO conversation context could understand it
+If standalone already, keep it unchanged.
 
-If the question is ALREADY standalone (no references to conversation):
-- Return it UNCHANGED
+TASK 2 - CLASSIFY: Determine if this needs document search or just conversation memory.
 
-RESPOND WITH ONLY THE QUESTION (either rewritten or original). No explanation."""
+"rag" - Question asks about PROJECT DOCUMENTS, EMAILS, or specific ENTITIES (companies, people, invoices, amounts, dates)
+  Examples: "What did MG Transport quote?" → rag (needs document search)
+            "Summarize all invoices from ABC Corp" → rag (needs to find ABC Corp docs)
+            "What's the pile length?" → rag (project-specific fact)
+
+"conversation" - Question asks about OUR CHAT ITSELF, not project documents
+  Examples: "Summarize what we've discussed" → conversation
+            "What were the key points?" → conversation  
+            "Repeat your last answer" → conversation
+
+KEY: If it mentions a specific entity (company, person, invoice number) that needs LOOKUP, it's "rag".
+     If it's asking about the chat dialogue itself, it's "conversation".
+
+RESPOND IN THIS EXACT FORMAT (two lines):
+QUESTION: <the standalone question>
+TYPE: <rag or conversation>"""
 
         try:
             response = self.gemini_client.models.generate_content(
@@ -220,30 +232,45 @@ RESPOND WITH ONLY THE QUESTION (either rewritten or original). No explanation.""
                 contents=rewrite_prompt,
                 config={
                     "temperature": REWRITER_TEMPERATURE,
-                    "max_output_tokens": 200
+                    "max_output_tokens": 250
                 }
             )
             
-            standalone = response.text.strip().strip('"').strip("'")
+            response_text = response.text.strip()
+            
+            # Parse the two-line response format
+            standalone = question  # Default to original
+            question_type = "rag"  # Default to RAG (safer)
+            
+            for line in response_text.split('\n'):
+                line = line.strip()
+                if line.upper().startswith('QUESTION:'):
+                    standalone = line[9:].strip().strip('"').strip("'")
+                elif line.upper().startswith('TYPE:'):
+                    type_value = line[5:].strip().lower()
+                    if type_value in ("rag", "conversation"):
+                        question_type = type_value
             
             # Check if it was actually rewritten
             was_rewritten = standalone.lower() != question.lower()
             
-            logger.info(f"Rewrite: '{question}' -> '{standalone}' (rewritten={was_rewritten})")
+            logger.info(f"Rewrite: '{question}' -> '{standalone}' (rewritten={was_rewritten}, type={question_type})")
             
             return RewriteResult(
                 original_question=question,
                 standalone_question=standalone,
-                was_rewritten=was_rewritten
+                was_rewritten=was_rewritten,
+                question_type=question_type
             )
             
         except Exception as e:
             logger.error(f"Rewrite failed: {e}")
-            # Fallback: return original question
+            # Fallback: return original question with RAG type (safer default)
             return RewriteResult(
                 original_question=question,
                 standalone_question=question,
-                was_rewritten=False
+                was_rewritten=False,
+                question_type="rag"
             )
     
     def generate_summary(

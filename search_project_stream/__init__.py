@@ -70,8 +70,10 @@ def stream_search_generator(
     
     try:
         # ================================================================
-        # STEP 0: Rewrite follow-up question (if conversation context exists)
+        # STEP 0: Rewrite + Classify question (if conversation context exists)
         # ================================================================
+        question_type = "rag"  # Default to RAG
+        
         if summary or recent_messages:
             yield format_sse("thinking", {"status": "🧠 Understanding your question..."})
             
@@ -84,21 +86,117 @@ def stream_search_generator(
                     project_name=project_name or project_id.replace('_', ' ').title()
                 )
                 standalone_question = rewrite_result.standalone_question
+                question_type = rewrite_result.question_type
                 
                 # Send rewrite info to frontend (for debugging/transparency)
                 yield format_sse("rewrite", {
                     "original": rewrite_result.original_question,
                     "standalone": rewrite_result.standalone_question,
-                    "was_rewritten": rewrite_result.was_rewritten
+                    "was_rewritten": rewrite_result.was_rewritten,
+                    "question_type": question_type
                 })
                 
                 if rewrite_result.was_rewritten:
-                    logging.info(f"Rewrite: '{question}' -> '{standalone_question}'")
+                    logging.info(f"Rewrite: '{question}' -> '{standalone_question}' (type={question_type})")
+                else:
+                    logging.info(f"Question classified as: {question_type}")
                     
             except Exception as e:
-                logging.warning(f"Rewrite failed, using original question: {e}")
-                # Continue with original question
+                logging.warning(f"Rewrite failed, using original question with RAG: {e}")
+                # Continue with original question and RAG type
         
+        # ================================================================
+        # CONVERSATION-ONLY PATH: Skip vector search, answer from chat history
+        # ================================================================
+        if question_type == "conversation":
+            yield format_sse("thinking", {"status": "📝 Analyzing conversation..."})
+            
+            # No sources for conversation questions
+            yield format_sse("sources", {
+                "sources": [],
+                "chunks_retrieved": 0,
+                "search_time_ms": 0
+            })
+            
+            llm_start = time.time()
+            
+            # Build conversation context for the LLM
+            conversation_context = ""
+            if summary:
+                conversation_context += f"CONVERSATION SUMMARY:\n{summary}\n\n"
+            if recent_messages:
+                conversation_context += "RECENT MESSAGES:\n"
+                for msg in (recent_messages or [])[-10:]:  # Last 10 messages
+                    role = "User" if msg.get("role") == "user" else "Assistant"
+                    conversation_context += f"{role}: {msg.get('content', '')}\n\n"
+            
+            system_prompt = f"""You are an assistant helping users recall and summarize their conversation.
+
+PROJECT: {project_name or project_id.replace('_', ' ').title()}
+
+Your task is to answer questions about the conversation itself - summarizing what was discussed,
+recalling specific points, or clarifying previous answers.
+
+Be specific - include exact details, names, numbers, and findings that were mentioned."""
+
+            user_prompt = f"""{conversation_context}
+
+USER'S QUESTION: {standalone_question}
+
+Provide a helpful response based on the conversation above."""
+
+            # Stream response using Gemini (ProjectSearch and LLM_PROVIDER imported at top)
+            search = ProjectSearch()
+            
+            if LLM_PROVIDER == "gemini":
+                full_prompt = f"{system_prompt}\n\n{user_prompt}"
+                response = search.gemini_model.models.generate_content_stream(
+                    model="gemini-3-flash-preview",
+                    contents=full_prompt,
+                    config={"temperature": 0.3}
+                )
+                for chunk in response:
+                    if chunk.text:
+                        yield format_sse("chunk", {"text": chunk.text})
+            else:
+                response = search.openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    temperature=0.7,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    stream=True
+                )
+                for chunk in response:
+                    if chunk.choices[0].delta.content:
+                        yield format_sse("chunk", {"text": chunk.choices[0].delta.content})
+            
+            llm_time_ms = int((time.time() - llm_start) * 1000)
+            total_time_ms = int((time.time() - total_start) * 1000)
+            
+            done_data = {
+                "search_time_ms": 0,
+                "llm_time_ms": llm_time_ms,
+                "total_time_ms": total_time_ms,
+                "chunks_retrieved": 0,
+                "question_type": "conversation"
+            }
+            
+            if rewrite_result:
+                done_data["rewrite"] = {
+                    "original": rewrite_result.original_question,
+                    "standalone": rewrite_result.standalone_question,
+                    "was_rewritten": rewrite_result.was_rewritten,
+                    "question_type": question_type
+                }
+            
+            yield format_sse("done", done_data)
+            return  # Exit early - no RAG needed
+        
+        # ================================================================
+        # RAG PATH: Full vector search pipeline
+        # ================================================================
         yield format_sse("thinking", {"status": "🔍 Searching project data..."})
         
         # Create search instance
@@ -284,7 +382,8 @@ Please provide a clear, specific answer based on the context above. Cite relevan
             "search_time_ms": search_time_ms,
             "llm_time_ms": llm_time_ms,
             "total_time_ms": total_time_ms,
-            "chunks_retrieved": len(raw_results)
+            "chunks_retrieved": len(raw_results),
+            "question_type": "rag"
         }
         
         # Include rewrite info in done event for persistence
@@ -292,7 +391,8 @@ Please provide a clear, specific answer based on the context above. Cite relevan
             done_data["rewrite"] = {
                 "original": rewrite_result.original_question,
                 "standalone": rewrite_result.standalone_question,
-                "was_rewritten": rewrite_result.was_rewritten
+                "was_rewritten": rewrite_result.was_rewritten,
+                "question_type": question_type
             }
         
         yield format_sse("done", done_data)

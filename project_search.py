@@ -19,6 +19,7 @@ Usage:
 """
 
 import json
+import logging
 import os
 import re
 import time
@@ -298,7 +299,16 @@ class ProjectSearch:
         if filter_metadata:
             query_params["filter"] = filter_metadata
         
-        results = self.pinecone_index.query(**query_params)
+        logging.info(f"Pinecone query: namespace={namespace}, top_k={top_k}")
+        query_start = time.time()
+        
+        try:
+            results = self.pinecone_index.query(**query_params)
+            query_time = int((time.time() - query_start) * 1000)
+            logging.info(f"Pinecone query completed: {len(results.get('matches', []))} matches in {query_time}ms")
+        except Exception as e:
+            logging.error(f"Pinecone query failed after {int((time.time() - query_start) * 1000)}ms: {e}")
+            raise
         
         # Convert to list of dicts
         matches = []
