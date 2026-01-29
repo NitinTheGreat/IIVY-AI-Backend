@@ -4,6 +4,11 @@ Azure Function: search_project_stream
 HTTP Trigger with SSE streaming for real-time search responses.
 Like ChatGPT/Gemini - sends "thinking" status, then streams answer tokens.
 
+CONVERSATION-AWARE RAG:
+- Accepts conversation context (summary + recent messages)
+- Rewrites follow-up questions to standalone queries
+- Passes conversation context to answer LLM for consistency
+
 NOTE: Azure Functions v1 model buffers responses. For true streaming,
 the frontend calls this endpoint DIRECTLY (bypassing Database Backend proxy)
 which removes one buffering layer and speeds up response delivery.
@@ -13,7 +18,7 @@ import sys
 import os
 import json
 import time
-from typing import Generator
+from typing import Generator, Optional, List, Dict
 
 # Add parent directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -21,6 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import azure.functions as func
 
 from project_search import ProjectSearch, LLM_PROVIDER
+from conversation import ConversationManager, RewriteResult
 
 
 def format_sse(event: str, data: dict) -> str:
@@ -28,21 +34,71 @@ def format_sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-def stream_search_generator(project_id: str, question: str, top_k: int = None, filter_metadata: dict = None) -> Generator[str, None, None]:
+def stream_search_generator(
+    project_id: str,
+    question: str,
+    top_k: int = None,
+    filter_metadata: dict = None,
+    # NEW: Conversation context
+    summary: Optional[str] = None,
+    recent_messages: Optional[List[Dict]] = None,
+    project_name: Optional[str] = None
+) -> Generator[str, None, None]:
     """
     Generator that yields SSE events for streaming search.
     
     Events:
     - thinking: Status updates during processing
+    - rewrite: Original and standalone question (for debugging)
     - sources: Retrieved sources (sent before answer)
     - chunk: Answer text chunks
     - done: Final timing stats
     - error: Error information
+    
+    Args:
+        project_id: Pinecone namespace for the project
+        question: User's question (may be a follow-up)
+        top_k: Number of chunks to retrieve
+        filter_metadata: Optional Pinecone filters
+        summary: Conversation summary for context
+        recent_messages: Recent messages for context
+        project_name: Project name for prompts
     """
     total_start = time.time()
+    rewrite_result: Optional[RewriteResult] = None
+    standalone_question = question  # Default to original
     
     try:
-        # Yield initial thinking status
+        # ================================================================
+        # STEP 0: Rewrite follow-up question (if conversation context exists)
+        # ================================================================
+        if summary or recent_messages:
+            yield format_sse("thinking", {"status": "🧠 Understanding your question..."})
+            
+            try:
+                conv_manager = ConversationManager()
+                rewrite_result = conv_manager.rewrite_question(
+                    question=question,
+                    summary=summary,
+                    recent_messages=recent_messages or [],
+                    project_name=project_name or project_id.replace('_', ' ').title()
+                )
+                standalone_question = rewrite_result.standalone_question
+                
+                # Send rewrite info to frontend (for debugging/transparency)
+                yield format_sse("rewrite", {
+                    "original": rewrite_result.original_question,
+                    "standalone": rewrite_result.standalone_question,
+                    "was_rewritten": rewrite_result.was_rewritten
+                })
+                
+                if rewrite_result.was_rewritten:
+                    logging.info(f"Rewrite: '{question}' -> '{standalone_question}'")
+                    
+            except Exception as e:
+                logging.warning(f"Rewrite failed, using original question: {e}")
+                # Continue with original question
+        
         yield format_sse("thinking", {"status": "🔍 Searching project data..."})
         
         # Create search instance
@@ -65,16 +121,20 @@ def stream_search_generator(project_id: str, question: str, top_k: int = None, f
                 })
             return
         
-        # Determine top_k based on question type
+        # Determine top_k based on question type (use standalone question for better detection)
         if top_k is None:
-            top_k = search._determine_top_k(question)
+            top_k = search._determine_top_k(standalone_question)
         
-        # Step 1: Embed the question
+        # ================================================================
+        # STEP 1: Embed the question (use STANDALONE question for retrieval)
+        # ================================================================
         search_start = time.time()
-        yield format_sse("thinking", {"status": "🧠 Understanding your question..."})
-        question_embedding = search._embed_question(question)
+        yield format_sse("thinking", {"status": "🧠 Embedding query..."})
+        question_embedding = search._embed_question(standalone_question)
         
-        # Step 2: Search Pinecone
+        # ================================================================
+        # STEP 2: Search Pinecone
+        # ================================================================
         yield format_sse("thinking", {"status": "📚 Retrieving relevant documents..."})
         raw_results = search._search_pinecone(
             embedding=question_embedding,
@@ -96,10 +156,12 @@ def stream_search_generator(project_id: str, question: str, top_k: int = None, f
             return
         
         # Sort by timestamp if "latest" query
-        if search._is_latest_query(question):
+        if search._is_latest_query(standalone_question):
             raw_results = search._sort_by_timestamp(raw_results)
         
-        # Build sources for early return
+        # ================================================================
+        # STEP 3: Build sources for early return
+        # ================================================================
         sources = []
         for src in raw_results[:5]:  # Top 5 sources
             sources.append({
@@ -109,7 +171,9 @@ def stream_search_generator(project_id: str, question: str, top_k: int = None, f
                 "score": src["score"],
                 "sender": src["metadata"].get("sender_name") or src["metadata"].get("sender_email", "Unknown"),
                 "timestamp": src["metadata"].get("timestamp", "")[:10],
-                "subject": src["metadata"].get("thread_subject") or src["metadata"].get("email_subject", "")
+                "subject": src["metadata"].get("thread_subject") or src["metadata"].get("email_subject", ""),
+                "file_id": src["metadata"].get("file_id", ""),
+                "page": src["metadata"].get("page", "")
             })
         
         # Yield sources early (so frontend can show them while answer generates)
@@ -119,18 +183,22 @@ def stream_search_generator(project_id: str, question: str, top_k: int = None, f
             "search_time_ms": search_time_ms
         })
         
-        # Step 3: Build context for LLM
+        # ================================================================
+        # STEP 4: Build context for LLM
+        # ================================================================
         context = search._build_context(raw_results)
         
-        # Step 4: Generate answer with LLM (streaming)
+        # ================================================================
+        # STEP 5: Generate answer with LLM (with conversation context)
+        # ================================================================
         yield format_sse("thinking", {"status": f"✨ Generating answer from {len(raw_results)} sources..."})
         
         llm_start = time.time()
         
-        # Build prompts
+        # Build system prompt
         system_prompt = f"""You are an expert assistant helping users find information in their project emails and documents.
 
-PROJECT: {project_id.replace('_', ' ').title()}
+PROJECT: {project_name or project_id.replace('_', ' ').title()}
 
 Your job is to answer questions based ONLY on the provided context. The context contains:
 - EMAIL messages (with sender, date, subject, body)
@@ -149,13 +217,33 @@ Guidelines:
 
 If asked about "latest" or "most recent", look at the timestamps in the sources to identify the newest."""
 
-        user_prompt = f"""CONTEXT FROM PROJECT EMAILS AND DOCUMENTS:
+        # Build user prompt with conversation context for Claude-like accuracy
+        conversation_context = ""
+        if summary or recent_messages:
+            conversation_context = "\n--- CONVERSATION CONTEXT ---\n"
+            
+            if summary:
+                conversation_context += f"Summary of prior conversation:\n{summary}\n\n"
+            
+            if recent_messages:
+                conversation_context += "Recent exchanges:\n"
+                for msg in (recent_messages or [])[-4:]:  # Last 2 Q&A pairs
+                    role = "User" if msg.get("role") == "user" else "Assistant"
+                    content = msg.get("content", "")[:600]
+                    if len(msg.get("content", "")) > 600:
+                        content += "..."
+                    conversation_context += f"{role}: {content}\n\n"
+            
+            conversation_context += "(The user's current question may reference this conversation.)\n--- END CONVERSATION CONTEXT ---\n\n"
+
+        user_prompt = f"""{conversation_context}CONTEXT FROM PROJECT EMAILS AND DOCUMENTS:
 
 {context}
 
 ---
 
-QUESTION: {question}
+QUESTION: {standalone_question}
+{f"(Original phrasing: {question})" if rewrite_result and rewrite_result.was_rewritten else ""}
 
 Please provide a clear, specific answer based on the context above. Cite relevant sources."""
 
@@ -189,13 +277,25 @@ Please provide a clear, specific answer based on the context above. Cite relevan
         llm_time_ms = int((time.time() - llm_start) * 1000)
         total_time_ms = int((time.time() - total_start) * 1000)
         
-        # Yield final done event
-        yield format_sse("done", {
+        # ================================================================
+        # STEP 6: Yield final done event with full debug info
+        # ================================================================
+        done_data = {
             "search_time_ms": search_time_ms,
             "llm_time_ms": llm_time_ms,
             "total_time_ms": total_time_ms,
             "chunks_retrieved": len(raw_results)
-        })
+        }
+        
+        # Include rewrite info in done event for persistence
+        if rewrite_result:
+            done_data["rewrite"] = {
+                "original": rewrite_result.original_question,
+                "standalone": rewrite_result.standalone_question,
+                "was_rewritten": rewrite_result.was_rewritten
+            }
+        
+        yield format_sse("done", done_data)
         
     except Exception as e:
         logging.error(f"search_project_stream: Error - {str(e)}")
@@ -219,10 +319,17 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     {
         "project_id": "88_supermarket",
         "question": "What is the scope of work?",
-        "top_k": 50  // Optional
+        "top_k": 50,  // Optional
+        // NEW: Conversation context for follow-ups
+        "summary": "## Current Focus\\n...",  // Optional
+        "recent_messages": [  // Optional
+            {"role": "user", "content": "..."},
+            {"role": "assistant", "content": "..."}
+        ],
+        "project_name": "88 Supermarket"  // Optional
     }
     
-    Returns: SSE stream with events: thinking, sources, chunk, done, error
+    Returns: SSE stream with events: thinking, rewrite, sources, chunk, done, error
     
     CORS enabled so frontend can call this DIRECTLY (bypassing Database Backend).
     This removes one buffering layer for faster response delivery.
@@ -269,15 +376,29 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             }
         )
     
+    # Optional parameters
     top_k = body.get("top_k")
     filter_metadata = body.get("filter_metadata")
     
-    logging.info(f'search_project_stream: project={project_id}, question="{question[:50]}..."')
+    # NEW: Conversation context parameters
+    summary = body.get("summary")
+    recent_messages = body.get("recent_messages")
+    project_name = body.get("project_name")
+    
+    logging.info(f'search_project_stream: project={project_id}, question="{question[:50]}...", has_summary={bool(summary)}, messages={len(recent_messages) if recent_messages else 0}')
     
     # Collect all SSE events from generator
     # NOTE: v1 model buffers, but frontend calls directly = 1 less hop
     sse_events = ""
-    for event in stream_search_generator(project_id, question, top_k, filter_metadata):
+    for event in stream_search_generator(
+        project_id=project_id,
+        question=question,
+        top_k=top_k,
+        filter_metadata=filter_metadata,
+        summary=summary,
+        recent_messages=recent_messages,
+        project_name=project_name
+    ):
         sse_events += event
     
     return func.HttpResponse(
